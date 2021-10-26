@@ -11,7 +11,7 @@ import time
 #####################
 
 class RNNOverWords(nn.Module):
-    def __init__(self,dict_size,input_size,hidden_size,output_size,dropout=0,rnn_type='lstm'):
+    def __init__(self,dict_size,input_size,hidden_size,output_size,second_hidden_size,dropout=0,rnn_type='lstm'):
         super(RNNOverWords, self).__init__()
         self.device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.embedding=nn.Embedding(dict_size,input_size)
@@ -19,14 +19,17 @@ class RNNOverWords(nn.Module):
         self.hidden_size=hidden_size
         self.rnn_type=rnn_type
         self.rnn=nn.LSTM(input_size,hidden_size,num_layers=1,dropout=dropout)
+        self.first_linear=nn.Linear(hidden_size,second_hidden_size)
         self.non_linear=nn.Tanh()
-        self.linear=nn.Linear(hidden_size,output_size)
+        self.linear=nn.Linear(second_hidden_size,output_size)
         self.softmax=nn.LogSoftmax(dim=2)
         self.init_weights()
 
     def init_weights(self):
         nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
         nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
+        nn.init.xavier_uniform_(self.first_linear.weight)
+        nn.init.xavier_uniform_(self.linear.weight)
 
     def convert_input(self,input,letter_indexer):
         return torch.LongTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
@@ -38,8 +41,8 @@ class RNNOverWords(nn.Module):
         init_state = (torch.from_numpy(np.zeros(self.hidden_size)).unsqueeze(0).unsqueeze(1).float().to(self.device),
                       torch.from_numpy(np.zeros(self.hidden_size)).unsqueeze(0).unsqueeze(1).float().to(self.device))
         output, (hidden_state, cell_state) = self.rnn(embedded_input, init_state)
-        output=self.softmax(self.linear(self.non_linear(output)))
-        hidden_state=self.softmax(self.linear(self.non_linear(hidden_state)))
+        output=self.softmax(self.linear(self.non_linear(self.first_linear(output))))
+        hidden_state=self.softmax(self.linear(self.non_linear(self.first_linear(hidden_state))))
         return output, hidden_state, cell_state
     
 
@@ -99,16 +102,18 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
     :param vocab_index: an Indexer of the character vocabulary (27 characters)
     :return: an RNNClassifier instance trained on the given data
     """
+    random.seed(0)
     start_time=time.time()
     device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dictionary_size=len(vocab_index)
     #arbitrary input size cause this is the size of the embedding created
-    input_size=10
-    hidden_size=5
+    input_size=12
+    hidden_size=8
+    second_hidden_size=4
     output_size=2
-    model = RNNOverWords(dictionary_size,input_size,hidden_size, output_size)
+    model = RNNOverWords(dictionary_size,input_size,hidden_size, output_size, second_hidden_size)
     model.to(device)
-    num_epochs=5
+    num_epochs=6
 
     training_data=[]
     for cons in train_cons_exs:
@@ -217,6 +222,7 @@ class RNNLanguageModelPredictions(nn.Module):
     def init_weights(self):
         nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
         nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
+        nn.init.xavier_uniform_(self.linear.weight)
 
     def convert_input(self,input,letter_indexer):
         return torch.LongTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
