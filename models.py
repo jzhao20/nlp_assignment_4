@@ -5,6 +5,7 @@ import collections
 import torch.nn as nn
 import torch
 import random
+import time
 #####################
 # MODELS FOR PART 1 #
 #####################
@@ -18,17 +19,17 @@ class RNNOverWords(nn.Module):
         self.hidden_size=hidden_size
         self.rnn_type=rnn_type
         self.rnn=nn.LSTM(input_size,hidden_size,num_layers=1,dropout=dropout)
+        self.non_linear=nn.Tanh()
         self.linear=nn.Linear(hidden_size,output_size)
         self.softmax=nn.LogSoftmax(dim=2)
         self.init_weights()
 
     def init_weights(self):
-        for name,param in self.rnn.named_parameters():
-            if 'weight_ih' in name or 'weight_hh' in name:
-                nn.init.xavier_uniform_(param.data)
+        nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
+        nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
 
     def convert_input(self,input,letter_indexer):
-        return torch.IntTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
+        return torch.LongTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
 
     def forward(self, input):
         embedded_input=self.embedding(input)
@@ -37,8 +38,8 @@ class RNNOverWords(nn.Module):
         init_state = (torch.from_numpy(np.zeros(self.hidden_size)).unsqueeze(0).unsqueeze(1).float().to(self.device),
                       torch.from_numpy(np.zeros(self.hidden_size)).unsqueeze(0).unsqueeze(1).float().to(self.device))
         output, (hidden_state, cell_state) = self.rnn(embedded_input, init_state)
-        output=self.softmax(self.linear(output))
-        hidden_state=self.softmax(self.linear(hidden_state))
+        output=self.softmax(self.linear(self.non_linear(output)))
+        hidden_state=self.softmax(self.linear(self.non_linear(hidden_state)))
         return output, hidden_state, cell_state
     
 
@@ -73,7 +74,7 @@ class RNNClassifier(ConsonantVowelClassifier):
         self.model=model
         self.vocab_index=vocab_index
     def predict(self, context):
-        input=self.model.convert_input(context,self.vocab_index)
+        input=self.model.convert_input(" "+context,self.vocab_index)
         output,log_probs,cells = self.model.forward(input)
         log_probs=torch.squeeze(log_probs)
         return torch.argmax(log_probs)
@@ -98,6 +99,7 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
     :param vocab_index: an Indexer of the character vocabulary (27 characters)
     :return: an RNNClassifier instance trained on the given data
     """
+    start_time=time.time()
     device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dictionary_size=len(vocab_index)
     #arbitrary input size cause this is the size of the embedding created
@@ -106,42 +108,33 @@ def train_rnn_classifier(args, train_cons_exs, train_vowel_exs, dev_cons_exs, de
     output_size=2
     model = RNNOverWords(dictionary_size,input_size,hidden_size, output_size)
     model.to(device)
-    num_epochs=10
+    num_epochs=5
 
-    train_cons_array=np.asarray(train_cons_exs).reshape(-1,1)
-    constants=np.zeros(train_cons_array.size,dtype=int).reshape(-1,1)
-    train_cons_array=np.hstack((train_cons_array,constants))
-    train_vowel_array=np.asarray(train_vowel_exs).reshape(-1,1)
-    vowels=np.ones(train_vowel_array.size,dtype=int).reshape(-1,1)
-    train_vowel_array=np.hstack((train_vowel_array,vowels))
-    training_data = np.concatenate((train_cons_array,train_vowel_array),axis=0)
+    training_data=[]
+    for cons in train_cons_exs:
+        training_data.append([" "+cons,0])
+    for vowels in train_vowel_exs:
+        training_data.append([" "+vowels,1])
 
     learning_rate=.001
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    for epoch in range(0,num_epochs+1):
+    for epoch in range(0,num_epochs):
         total_loss=0
-        np.random.shuffle(training_data)
+        random.shuffle(training_data)
         for i in range(0,len(training_data)):
-            y_onehot=torch.zeros(output_size)
-            #[1,0] if constant
-            #[0,1] if vowel
-
-            array=np.asarray(training_data[i][1],dtype=np.int64)
-            y_onehot.scatter_(0,torch.from_numpy(array),1)
-            y_onehot = y_onehot.to(device)
-
-            model.zero_grad()
             input=model.convert_input(training_data[i][0],vocab_index)
-            output,log_probs,cells = model.forward(input)
+            y_onehot=torch.zeros(output_size).to(device)
+            y_onehot.scatter_(0, torch.from_numpy(np.asarray(training_data[i][1],dtype=np.int64)).to(device), 1)
+            model.zero_grad()
+            output,log_probs,cells = model.forward(input)     
             log_probs=torch.squeeze(log_probs)
-            #want to find out the 
             loss = torch.neg(log_probs).dot(y_onehot)
-            total_loss+=loss
+            total_loss += loss
             loss.backward()
             optimizer.step()
-
         print(f'epoch {epoch}: {total_loss}')
+    print(f'time: {time.time()-start_time}')
     return RNNClassifier(model,vocab_index)
 
 
@@ -222,12 +215,11 @@ class RNNLanguageModelPredictions(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        for name,param in self.rnn.named_parameters():
-            if 'weight_ih' in name or 'weight_hh' in name:
-                nn.init.xavier_uniform_(param.data)
+        nn.init.xavier_uniform_(self.rnn.weight_hh_l0)
+        nn.init.xavier_uniform_(self.rnn.weight_ih_l0)
 
     def convert_input(self,input,letter_indexer):
-        return torch.IntTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
+        return torch.LongTensor([letter_indexer.index_of(character) for character in input]).to(self.device)
     
     def forward(self, input):
 
@@ -270,7 +262,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
         training_data[index][1]=train_text[i:i+size_of_sentence+1]
 
     num_epochs=10
-    for epoch in range(0,num_epochs+1): 
+    for epoch in range(0,num_epochs): 
         #take the training text and divide it into 500 segments and train it on that 
         np.random.shuffle(training_data)
         total_loss=0
